@@ -2,7 +2,7 @@ import pandas as pd
 from pathlib import Path
 
 # Path to feature-rich dataset
-data_path = Path("data") / "nasdaq_all_ohlcv.parquet"
+data_path = Path("data") / "nasdaq_all.parquet"
 
 # Load dataset
 df = pd.read_parquet(data_path)
