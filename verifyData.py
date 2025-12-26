@@ -1,20 +1,43 @@
 import pandas as pd
 from pathlib import Path
+import os
 
-# Path to feature-rich dataset
-data_path = Path("data") / "nasdaq_all.parquet"
+# Path to feature dataset
+DATASET_PATH = (
+    Path(os.environ["PSCRATCH"])
+    / "StockPrediction"
+    / "Datasets"
+    / "stocks_all_features.parquet"
+)
 
-# Load dataset
-df = pd.read_parquet(data_path)
+print(f"📂 Loading dataset from:\n{DATASET_PATH}\n")
 
-# Print shape and columns
-print(f"Rows: {df.shape[0]}, Columns: {df.shape[1]}\n")
-print("Column Names:")
-print(df.columns.tolist())
+df = pd.read_parquet(DATASET_PATH)
 
-# Show first and last few rows
-print("\nFirst 10 rows:")
-print(df.head(10))
+print("📊 Dataset summary")
+print("-" * 40)
+print(f"Total rows      : {len(df):,}")
+print(f"Unique tickers  : {df['ticker'].nunique():,}")
+print(f"Date range      : {df['date'].min()} → {df['date'].max()}")
+print(f"Columns         : {len(df.columns)}")
 
-print("\nLast 10 rows:")
-print(df.tail(10))
+# Check for NaNs
+nan_cols = df.columns[df.isna().any()].tolist()
+print("\n🧪 NaN check")
+if nan_cols:
+    print("⚠️ Columns with NaNs:")
+    for c in nan_cols:
+        print(f"  - {c}")
+else:
+    print("✅ No NaNs found")
+
+# Show sample tickers
+print("\n🔍 Sample tickers:")
+print(df["ticker"].drop_duplicates().head(20).tolist())
+
+# Optional: rows per ticker stats
+rows_per_ticker = df.groupby("ticker").size()
+print("\n📈 Rows per ticker")
+print(f"Min rows : {rows_per_ticker.min():,}")
+print(f"Median   : {int(rows_per_ticker.median()):,}")
+print(f"Max rows : {rows_per_ticker.max():,}")

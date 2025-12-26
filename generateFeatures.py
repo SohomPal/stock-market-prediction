@@ -1,75 +1,162 @@
 import pandas as pd
 import numpy as np
 from pathlib import Path
+import os
 import ta
 
+# =============================
 # Paths
-data_dir = Path("data")
-input_path = data_dir / "nasdaq_all_ohlcv.parquet"
-output_path = data_dir / "nasdaq_all.parquet"
+# =============================
+BASE_DIR = Path(os.environ["PSCRATCH"]) / "StockPrediction"
+INPUT_PATH = BASE_DIR / "Datasets" / "stocks_all_ohlcv.parquet"
+OUTPUT_PATH = BASE_DIR / "Datasets" / "stocks_all_features.parquet"
 
-# Load base data
-df = pd.read_parquet(input_path)
+# =============================
+# Config
+# =============================
+MIN_HISTORY = 60
+MIN_ROWS_PER_TICKER = 100
+MIN_DATE = pd.Timestamp("1990-01-01")
+EPS = 1e-8
 
-# Ensure date column exists and is datetime
-df["Date"] = pd.to_datetime(df["Date"])
-df = df.sort_values(["ticker", "Date"])
+print("📥 Loading OHLCV dataset...")
+df = pd.read_parquet(INPUT_PATH)
 
-# Function to compute indicators for each stock
-def add_technical_indicators(group):
-    if len(group) < 30:
-        return pd.DataFrame()  # skip too-short histories
-    group = group.copy()
+initial_rows = len(df)
+initial_tickers = df["ticker"].nunique()
 
-    # Trend
-    group["sma_20"] = ta.trend.SMAIndicator(group["Close"], window=20).sma_indicator()
-    group["sma_50"] = ta.trend.SMAIndicator(group["Close"], window=50).sma_indicator()
-    group["ema_12"] = ta.trend.EMAIndicator(group["Close"], window=12).ema_indicator()
-    group["ema_26"] = ta.trend.EMAIndicator(group["Close"], window=26).ema_indicator()
-    macd = ta.trend.MACD(group["Close"])
-    group["macd"] = macd.macd()
-    group["macd_signal"] = macd.macd_signal()
+# =============================
+# Date sanity filter
+# =============================
+print("🗓️ Dropping invalid / pre-1990 dates...")
+df["date"] = pd.to_datetime(df["date"], errors="coerce")
 
-    # Momentum
-    group["rsi_14"] = ta.momentum.RSIIndicator(group["Close"], window=14).rsi()
-    stoch = ta.momentum.StochasticOscillator(group["High"], group["Low"], group["Close"])
-    group["stoch_k"] = stoch.stoch()
-    group["stoch_d"] = stoch.stoch_signal()
-    group["roc"] = ta.momentum.ROCIndicator(group["Close"]).roc()
+df = df[df["date"] >= MIN_DATE].copy()
 
-    # Volatility
-    group["atr_14"] = ta.volatility.AverageTrueRange(group["High"], group["Low"], group["Close"]).average_true_range()
-    boll = ta.volatility.BollingerBands(group["Close"])
-    group["bollinger_h"] = boll.bollinger_hband()
-    group["bollinger_l"] = boll.bollinger_lband()
+rows_dropped_by_date = initial_rows - len(df)
 
-    # Volume
-    group["obv"] = ta.volume.OnBalanceVolumeIndicator(group["Close"], group["Volume"]).on_balance_volume()
-    group["mfi"] = ta.volume.MFIIndicator(group["High"], group["Low"], group["Close"], group["Volume"]).money_flow_index()
-    group["vpt"] = ta.volume.VolumePriceTrendIndicator(group["Close"], group["Volume"]).volume_price_trend()
+# =============================
+# Sorting + dtypes
+# =============================
+df = df.sort_values(["ticker", "date"]).reset_index(drop=True)
 
-    # Custom features
-    group["daily_return"] = group["Close"].pct_change(fill_method=None)
-    group["log_return"] = np.log(group["Close"] / group["Close"].shift(1)).replace([np.inf, -np.inf], 0)
-    group["volatility_5"] = group["daily_return"].rolling(5).std()
-    group["volatility_20"] = group["daily_return"].rolling(20).std()
-    group["price_range_pct"] = (group["High"] - group["Low"]) / group["Close"]
-    group["volume_delta"] = group["Volume"].diff()
+FLOAT_COLS = ["open", "high", "low", "close", "adj_close", "volume"]
+df[FLOAT_COLS] = df[FLOAT_COLS].astype("float32")
 
-    return group
+# =============================
+# Feature generation per ticker
+# =============================
+def add_technical_indicators(group: pd.DataFrame) -> pd.DataFrame:
+    if len(group) < MIN_HISTORY:
+        return pd.DataFrame()
 
-# Apply feature generation per stock
+    g = group.copy()
+
+    close = g["close"]
+    high = g["high"]
+    low = g["low"]
+    volume = g["volume"]
+
+    # -------- Trend --------
+    g["sma_20"] = ta.trend.SMAIndicator(close, window=20).sma_indicator()
+    g["sma_50"] = ta.trend.SMAIndicator(close, window=50).sma_indicator()
+    g["ema_12"] = ta.trend.EMAIndicator(close, window=12).ema_indicator()
+    g["ema_26"] = ta.trend.EMAIndicator(close, window=26).ema_indicator()
+
+    macd = ta.trend.MACD(close)
+    g["macd"] = macd.macd()
+    g["macd_signal"] = macd.macd_signal()
+
+    # -------- Momentum --------
+    g["rsi_14"] = ta.momentum.RSIIndicator(close, window=14).rsi()
+
+    stoch = ta.momentum.StochasticOscillator(high, low, close)
+    g["stoch_k"] = stoch.stoch()
+    g["stoch_d"] = stoch.stoch_signal()
+
+    g["roc"] = ta.momentum.ROCIndicator(close, window=10).roc()
+
+    # -------- Volatility --------
+    atr = ta.volatility.AverageTrueRange(high, low, close)
+    g["atr_14"] = atr.average_true_range()
+
+    boll = ta.volatility.BollingerBands(close)
+    g["bollinger_h"] = boll.bollinger_hband()
+    g["bollinger_l"] = boll.bollinger_lband()
+    g["bollinger_w"] = boll.bollinger_wband()
+
+    # -------- Volume --------
+    g["obv"] = ta.volume.OnBalanceVolumeIndicator(close, volume).on_balance_volume()
+    g["mfi"] = ta.volume.MFIIndicator(high, low, close, volume).money_flow_index()
+    g["vpt"] = ta.volume.VolumePriceTrendIndicator(close, volume).volume_price_trend()
+
+    # -------- Returns --------
+    g["return_1d"] = close.pct_change()
+    g["log_return"] = np.log((close + EPS) / (close.shift(1) + EPS))
+
+    g["volatility_5"] = g["log_return"].rolling(5).std()
+    g["volatility_20"] = g["log_return"].rolling(20).std()
+
+    # -------- Microstructure --------
+    g["price_range_pct"] = (high - low) / (close + EPS)
+    g["volume_delta"] = volume.diff()
+    g["volume_z"] = (volume - volume.rolling(20).mean()) / (
+        volume.rolling(20).std() + EPS
+    )
+
+    return g
+
+print("⚙️ Computing technical indicators...")
 df = df.groupby("ticker", group_keys=False).apply(add_technical_indicators)
 
-# Drop rows with any missing values caused by indicator lags
-df = df.dropna()
+# =============================
+# Final cleanup
+# =============================
+print("🧹 Cleaning invalid values...")
+df = df.replace([np.inf, -np.inf], np.nan)
+df = df.dropna().reset_index(drop=True)
 
-# Save enriched dataset
-df.to_parquet(output_path)
+rows_after_features = len(df)
 
-# Print preview
-print("First 10 rows:")
-print(df.head(10))
-print("\nLast 10 rows:")
-print(df.tail(10))
-print(f"\nSaved feature-rich dataset to {output_path} with {len(df)} rows.")
+# =============================
+# Enforce MIN ROWS per ticker (POST-CLEAN)
+# =============================
+ticker_counts = df["ticker"].value_counts()
+valid_tickers = ticker_counts[ticker_counts >= MIN_ROWS_PER_TICKER].index
+
+dropped_tickers_post = df["ticker"].nunique() - len(valid_tickers)
+
+df = df[df["ticker"].isin(valid_tickers)].reset_index(drop=True)
+
+# Downcast to save memory
+for col in df.columns:
+    if df[col].dtype == "float64":
+        df[col] = df[col].astype("float32")
+
+# =============================
+# Save
+# =============================
+df.to_parquet(
+    OUTPUT_PATH,
+    engine="pyarrow",
+    compression="snappy"
+)
+
+# =============================
+# Report
+# =============================
+print("\n✅ Feature dataset ready")
+print(f"Initial rows: {initial_rows:,}")
+print(f"Rows dropped (pre-1990 dates): {rows_dropped_by_date:,}")
+print(f"Rows after feature cleaning: {rows_after_features:,}")
+print(f"Final rows: {len(df):,}")
+
+print(f"Initial tickers: {initial_tickers:,}")
+print(f"Tickers dropped post-clean (< {MIN_ROWS_PER_TICKER} rows): {dropped_tickers_post:,}")
+print(f"Final tickers: {df['ticker'].nunique():,}")
+
+print(f"Date range: {df['date'].min()} → {df['date'].max()}")
+print(f"Saved to: {OUTPUT_PATH}")
+
+print("\nSample:")
+print(df.head())
